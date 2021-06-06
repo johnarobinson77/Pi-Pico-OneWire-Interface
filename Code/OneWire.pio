@@ -1,0 +1,94 @@
+;
+; Copyright (c) 2020 Raspberry Pi (Trading) Ltd.
+;
+; SPDX-License-Identifier: BSD-3-Clause
+;
+
+.program OneWire
+
+// The two LSBs of a fresh pull are command bits.  3 commands
+// are implemented. 
+// 01 issues a reset pulse and waits for a reponce to end.  No
+//   reult is pushed.
+// 01 causes the PIO to wait unt the onewire is a 1.  It is used to indicate 
+//   the device is done with reset or a temperature read so that a following
+//   command is not sent to soon  This unction automatically follows a reset.
+// 11 write the next n+1 bits in the out register bits to the onwwire bus
+//   No responce is pushed.  n is the next 4 bits in out register after the 
+//   2 command bits.  the data written to the OneWire is the next n+1 bits
+// 10 read n+1 bits from the one wire bus where n is the next 5 bits 
+//   in the out register.  Data will be in the UPPER n+1 bits of the 
+//   push.  n must be less than 32. Each read reulst in no more than
+//   1 word pushed.  If more than 32 bits is required, send multipple
+//   read commands 
+// Don't send more than  7 read or in a row without reading
+// data from the fifo.  Otherwise the fifo's will overflow.
+
+loop:
+    pull   // first two bits are a command
+    out  x,       1     // leading bit is 0, reset
+    jmp  !x,     reset 
+    out  x,        1    // if fist bit is 0 
+    jmp !x,      read   // read
+
+write:  // sends 8 bits from out to wire
+    out  y,      4
+write_loop:
+    out  x,      1
+    set pindirs, 1
+    jmp  !x     write_zero_bit
+    jmp write_bit_end
+write_zero_bit:
+    NOP                     [15]
+write_bit_end:
+    set pindirs, 0          [28]
+    jmp y--     write_loop
+    jmp loop
+
+read:   // request up to 32 bits from wire and sends to inline
+    out  y,        5
+read_loop:
+    set pindirs, 1
+    set pindirs, 0          [5]
+    in  pins     1          [25]
+    jmp y--      read_loop
+    push
+    jmp loop
+    
+reset:  // issue a reset pulse and wait for responce to finish
+    out  x,      1
+    jmp  !x      wait_on_1
+    set  x,      26  
+    set  pindirs, 1         [8]
+reset_loop:
+    jmp  x--,    reset_loop [8]
+    set pindirs, 0 [15]
+
+wait_on_1:  // wait for but so be idle
+    jmp pin,loop
+    jmp wait_on_1
+
+% c-sdk {
+static inline void OneWire_program_init(PIO pio, uint sm, uint offset, uint pin) {
+    pio_sm_config c = OneWire_program_get_default_config(offset);
+
+    // Map the state machine's OUT pin group to one pin, namely the `pin`
+    // parameter to this function.
+    sm_config_set_out_pins(&c, pin, 1);
+    sm_config_set_set_pins(&c, pin, 1);
+    sm_config_set_in_pins(&c, pin);
+    sm_config_set_jmp_pin(&c, pin);
+    // Set this pin's GPIO function (connect PIO to the pad)
+    pio_gpio_init(pio, pin);
+    // Set the pin direction to output at the PIO
+    pio_sm_set_consecutive_pindirs(pio, sm, pin, 1, true);
+    float div = (float)clock_get_hz(clk_sys) / (5 * 100000);
+    sm_config_set_clkdiv(&c, div);
+    
+    // Load our configuration, and jump to the start of the program
+    pio_sm_init(pio, sm, offset, &c);
+    pio_sm_set_pins(pio, sm, 0);  //set output to 0. Used pindirs to control.
+    // Set the state machine running
+    pio_sm_set_enabled(pio, sm, true);
+}
+%}
